@@ -265,6 +265,72 @@ function showGameComplete() {
  * Called by the host page when the player submits their name.
  * Draws the certificate and activates the download buttons.
  */
+const _storageEncoder = new TextEncoder();
+const _storageDecoder = new TextDecoder();
+
+function _bytesToBase64(bytes) {
+  let binary = '';
+  const arr = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  for (let i = 0; i < arr.length; i += 1) binary += String.fromCharCode(arr[i]);
+  return btoa(binary);
+}
+
+function _base64ToBytes(base64) {
+  const binary = atob(base64);
+  const out = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) out[i] = binary.charCodeAt(i);
+  return out;
+}
+
+async function _getStorageKey() {
+  const material = _storageEncoder.encode(`${location.origin}:arcade-certificates:v1`);
+  const hash = await crypto.subtle.digest('SHA-256', material);
+  return crypto.subtle.importKey('raw', hash, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
+}
+
+async function _encryptForStorage(plainText) {
+  if (!crypto || !crypto.subtle) return plainText;
+  const key = await _getStorageKey();
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const encrypted = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, _storageEncoder.encode(plainText));
+  return JSON.stringify({
+    v: 1,
+    iv: _bytesToBase64(iv),
+    data: _bytesToBase64(new Uint8Array(encrypted)),
+  });
+}
+
+async function _decryptFromStorage(payload) {
+  if (!payload) return '[]';
+  try {
+    const parsed = JSON.parse(payload);
+    if (!parsed || parsed.v !== 1 || !parsed.iv || !parsed.data) return payload;
+    if (!crypto || !crypto.subtle) return '[]';
+    const key = await _getStorageKey();
+    const decrypted = await crypto.subtle.decrypt(
+      { name: 'AES-GCM', iv: _base64ToBytes(parsed.iv) },
+      key,
+      _base64ToBytes(parsed.data),
+    );
+    return _storageDecoder.decode(decrypted);
+  } catch (_) {
+    return payload;
+  }
+}
+
+async function _loadStoredCertificates() {
+  const raw = localStorage.getItem('arcade-certificates');
+  const plain = await _decryptFromStorage(raw);
+  const parsed = JSON.parse(plain || '[]');
+  return Array.isArray(parsed) ? parsed : [];
+}
+
+async function _saveStoredCertificates(certs) {
+  const plain = JSON.stringify(certs);
+  const payload = await _encryptForStorage(plain);
+  localStorage.setItem('arcade-certificates', payload);
+}
+
 export async function generateCertificateFor(playerName) {
   const name           = (playerName || '').trim().slice(0, 30) || 'Player';
   const certId         = generateCertId();
@@ -275,9 +341,9 @@ export async function generateCertificateFor(playerName) {
 
   try {
     const cert  = { id: certId, player: name, game: gameTitle, date: completionDate, score };
-    const certs = JSON.parse(localStorage.getItem('arcade-certificates') || '[]');
+    const certs = await _loadStoredCertificates();
     certs.push(cert);
-    localStorage.setItem('arcade-certificates', JSON.stringify(certs));
+    await _saveStoredCertificates(certs);
   } catch (_) { /* storage unavailable */ }
 
   if (dom.certCanvas) {
