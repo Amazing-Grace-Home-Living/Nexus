@@ -466,6 +466,68 @@
       return 'SM-' + Date.now().toString(36).toUpperCase();
     }
 
+    const smStorageEncoder = new TextEncoder();
+    const smStorageDecoder = new TextDecoder();
+
+    function smBytesToBase64(bytes) {
+      let binary = '';
+      const arr = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+      for (let i = 0; i < arr.length; i += 1) binary += String.fromCharCode(arr[i]);
+      return btoa(binary);
+    }
+
+    function smBase64ToBytes(base64) {
+      const binary = atob(base64);
+      const out = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i += 1) out[i] = binary.charCodeAt(i);
+      return out;
+    }
+
+    async function smGetStorageKey() {
+      const material = smStorageEncoder.encode(`${location.origin}:arcade-certificates:v1`);
+      const hash = await crypto.subtle.digest('SHA-256', material);
+      return crypto.subtle.importKey('raw', hash, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
+    }
+
+    async function smEncryptForStorage(plainText) {
+      if (!crypto || !crypto.subtle) return plainText;
+      const key = await smGetStorageKey();
+      const iv = crypto.getRandomValues(new Uint8Array(12));
+      const encrypted = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, smStorageEncoder.encode(plainText));
+      return JSON.stringify({ v: 1, iv: smBytesToBase64(iv), data: smBytesToBase64(new Uint8Array(encrypted)) });
+    }
+
+    async function smDecryptFromStorage(payload) {
+      if (!payload) return '[]';
+      try {
+        const parsed = JSON.parse(payload);
+        if (!parsed || parsed.v !== 1 || !parsed.iv || !parsed.data) return payload;
+        if (!crypto || !crypto.subtle) return '[]';
+        const key = await smGetStorageKey();
+        const decrypted = await crypto.subtle.decrypt(
+          { name: 'AES-GCM', iv: smBase64ToBytes(parsed.iv) },
+          key,
+          smBase64ToBytes(parsed.data)
+        );
+        return smStorageDecoder.decode(decrypted);
+      } catch(_) {
+        return payload;
+      }
+    }
+
+    async function smLoadStoredCertificates() {
+      const raw = localStorage.getItem('arcade-certificates');
+      const plain = await smDecryptFromStorage(raw);
+      const parsed = JSON.parse(plain || '[]');
+      return Array.isArray(parsed) ? parsed : [];
+    }
+
+    async function smSaveStoredCertificates(certs) {
+      const plain = JSON.stringify(certs);
+      const payload = await smEncryptForStorage(plain);
+      localStorage.setItem('arcade-certificates', payload);
+    }
+
     function smShowCert() {
       document.getElementById('sm-name-phase').style.display = 'flex';
       document.getElementById('sm-cert-phase').style.display = 'none';
@@ -483,9 +545,9 @@
         const completionDate = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
         try {
           const cert = { id: certId, player: playerName, game: gameTitle, date: completionDate, score };
-          const certs = JSON.parse(localStorage.getItem('arcade-certificates') || '[]');
+          const certs = await smLoadStoredCertificates();
           certs.push(cert);
-          localStorage.setItem('arcade-certificates', JSON.stringify(certs));
+          await smSaveStoredCertificates(certs);
           // Mark Star Matrix complete for unlock purposes
           localStorage.setItem('sm_complete', 'true');
         } catch(_) {}
